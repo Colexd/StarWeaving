@@ -856,7 +856,7 @@ export class chatgpt extends plugin {///////////////////////////////////// * Cha
     const now = new Date()
     const currentDateTime = `${now.getFullYear()}年${String(now.getMonth() + 1).padStart(2, '0')}月${String(now.getDate()).padStart(2, '0')}日 ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
 
-    prompt = `当前日期时间：${currentDateTime} 对话人QQ号：${e.sender.user_id}  用户消息：${prompt}`
+    prompt = `当前日期时间：${currentDateTime} (星期${['日', '一', '二', '三', '四', '五', '六'][now.getDay()]}) 对话人QQ号：${e.sender.user_id}  用户消息：${prompt}`
 
     // ==================== 消息缓冲和延迟处理机制 ====================
     // 【恢复】消息缓冲和等待机制 (回到之前5秒延迟的模式)
@@ -949,7 +949,7 @@ export class chatgpt extends plugin {///////////////////////////////////// * Cha
     prompt.includes('什么')||prompt.includes('怎么')||prompt.includes('如何')||prompt.includes('为什么')) {
         waitTime = 4000; // 结尾是疑问词时等待4秒
         logger.info(`[ChatGPT Debug] 检测到用户输入以"?"结尾或包含"吗"，等待时间4秒`);
-    }else if(prompt.includes('...')||prompt.includes('。')||prompt.includes('：')){
+    }else if(prompt.includes('...')||prompt.includes('。')){
       waitTime = 12000; // 包含省略号或句号时等待12秒
       logger.info(`[ChatGPT Debug] 检测到用户输入"等待符"，等待时间12秒`);
     }
