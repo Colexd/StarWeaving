@@ -1025,12 +1025,6 @@ export class chatgpt extends plugin {///////////////////////////////////// * Cha
     // 创建一个新的 AbortController 用于本次请求
     const controller = new AbortController();
 
-    // 检查这个请求是否仍然是最新的，如果不是，直接中止
-    const lastRequestId = pendingRequests.get(conversationKey)?.requestId;
-    if (lastRequestId && lastRequestId !== requestId) {
-      logger.info(`[ChatGPT] 请求 ${requestId} 在执行前就已过时，将被忽略。`);
-      return;
-    }
     // 将控制器与请求ID一起存储
     pendingRequests.set(conversationKey, { controller, requestId });
 
@@ -1160,11 +1154,18 @@ export class chatgpt extends plugin {///////////////////////////////////// * Cha
       while ((match = emojiRegex.exec(tempTextForFindingEmojis)) !== null) {
         const emojiName = match[1];
         let imagePath = path.join(__dirname, 'emojis', `${emojiName}.png`);
-        const fileUrlImagePath = `file://${imagePath.replace(/\\/g, '/')}`;
-        try {
-          imagesToSend.push(segment.image(fileUrlImagePath));
-        } catch (imgError) {
-          logger.error(`[ChatGPT] 为 ${emojiName} 创建图片段时出错，路径为 ${fileUrlImagePath}: ${imgError}`);
+        
+        // 检查表情包文件是否存在
+        if (fs.existsSync(imagePath)) {
+          const fileUrlImagePath = `file://${imagePath.replace(/\\/g, '/')}`;
+          try {
+            imagesToSend.push(segment.image(fileUrlImagePath));
+          } catch (imgError) {
+            logger.error(`[ChatGPT] 为 ${emojiName} 创建图片段时出错，路径为 ${fileUrlImagePath}: ${imgError}`);
+          }
+        } else {
+          // 如果文件不存在，则在控制台输出报错
+          logger.error(`[ChatGPT] 表情包文件不存在: ${imagePath}`);
         }
       }
       response = response.replace(emojiRegex, '').trim();
