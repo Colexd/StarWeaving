@@ -488,10 +488,12 @@ export class Greet extends plugin {
         
         logger.info(`[定时问候] 用户 ${userId} 机器人最后回复时间: ${this.messageWaitRecords[userId]}, 已过 ${minutesDifference} 分钟, 等待阈值: ${randomWaitMinutes} 分钟`)
 
-        // 增加80%的概率检测
-        if (Math.random() < 0.8) {
-          if (minutesDifference >= randomWaitMinutes) {
-            logger.info(`[定时问候] 用户 ${userId} 已经 ${minutesDifference} 分钟没有回复消息，准备发送询问消息`)
+        if (minutesDifference >= randomWaitMinutes) {
+          logger.info(`[定时问候] 用户 ${userId} 已等待 ${minutesDifference} 分钟 (阈值: ${randomWaitMinutes} 分钟)，进行概率检测...`)
+          
+          // 增加80%的概率检测
+          if (Math.random() < 0.8) {
+            logger.info(`[定时问候] 用户 ${userId} 通过80%概率检测，准备发送询问消息`)
             
             // 生成询问消息
             const currentTimeStr = now.toLocaleString('zh-CN')
@@ -516,12 +518,9 @@ export class Greet extends plugin {
             // 清除该用户的等待记录，避免重复发送
             delete this.messageWaitRecords[userId]
             this.saveMessageWaitRecords()
+          } else {
+            logger.info(`[定时问候] 用户 ${userId} 未通过80%的概率检测，本次跳过，等待下次检查。`)
           }
-        } else {
-          logger.info(`[定时问候] 用户 ${userId} 未通过20%的等待问候概率检测，本次跳过。`)
-          // 即使未通过概率检测，也清除等待记录，避免循环
-          delete this.messageWaitRecords[userId]
-          this.saveMessageWaitRecords()
         }
       }
     }
@@ -1080,4 +1079,3 @@ export class Greet extends plugin {
 }
 
 export default Greet
-
