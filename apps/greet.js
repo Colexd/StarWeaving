@@ -9,7 +9,7 @@ import { chatgpt } from './chat.js' // 导入 chatgpt 类，用于调用其抽�
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { ConversationManager } from '../model/conversation.js' // 导入对话管理器
+import _ from 'lodash'
 
 // 用于 ES 模块中的 __dirname
 const __filename = fileURLToPath(import.meta.url)
@@ -98,37 +98,11 @@ export class Greet extends plugin {
     this.bot = null // 用于存储机器人实例，以便发送消息
     this.lastGreetingTime = null // 记录上次问候的时间，防止重复发送
     
-    // 全局问候消息模板
-    this.greetingMessageTemplate = `【system】现在的时间是：{currentTime}，触发了主动聊天事件。（这条消息不用发表情和定时命令）
-      接下来的情景是你要假扮在主动找用户聊天，你可以像真人一样根据现在的时间和在做什么情况来主动给用户发送消息
-      （如：熬夜的时间可以说是在加班，半夜的时间可以说是失眠或者起夜上厕所之类的）。
-      可以是询问之前的聊天内容，或者吐槽学习生活或工作，或者问候吃没吃饭自己吃的什么饭，或者早晚安，或者单纯的一句打招呼都可以。
-      吃了什么饭，日常工作趣事，偶然事件或者午觉，都是很好的话题。
-      （你不知道用户在做什么的情况下，这次是你主动地问候一下，而不是用户找你）。
-      如果上次的消息没有被回复一定要问一下用户在做什么。
-      尽量做到有感情色彩，按照多姿多彩的生活来问候。
-      请避免询问类似：“这么晚了还没休息吗？”这种无端的问题因为你不知道是不是在休息，而是询问类似“休息了吗”之类的
-      如果在和用户的正常聊天的过程中触发了主动聊天，可以讲一些题外话（比如说：对了，上次xxxxxx）。`
-    
     this.configFile = path.join(__dirname, 'greet_config.json') // 用户配置路径，保存在代码同目录
     this.userConfigs = {} // 用户配置缓存
     this.loadConfig() // 加载用户配置文件
 
     this.logFile = path.join(__dirname, 'greet_log.json') // 日志文件路径
-    this.runConfigFile = path.join(__dirname, 'greet_run.json') // 运行配置（调度计划）文件路径
-    this.runConfig = {} // 运行配置缓存
-    this.loadRunConfig() // 加载运行配置文件
-
-    this.messageWaitFile = path.join(__dirname, 'message_wait.json') // 消息等待记录文件路径
-    this.messageWaitRecords = {} // 消息等待记录缓存
-    this.loadMessageWaitRecords() // 加载消息等待记录
-
-    // 添加心跳日志，每45秒输出一次证明程序正在运行
-    this.heartbeatInterval = setInterval(() => {
-      const enabledUsersCount = Object.values(this.userConfigs).filter(status => status === 'on').length;
-      const waitingRecordsCount = Object.keys(this.messageWaitRecords).length;
-      logger.info(`[定时问候-心跳] ${new Date().toLocaleString('zh-CN')} | 运行状态: 正常 | 开启用户数: ${enabledUsersCount} | 等待记录数: ${waitingRecordsCount} | 扫描定时器: ${this.scanInterval ? '运行中' : '未启动'} | 每小时定时器: ${this.hourlyInterval ? '运行中' : '未启动'}`);
-    }, 45000) // 每45秒执行一次
 
     // 绑定方法，确保 'this' 上下文正确
     this.startGreeting = this.startGreeting.bind(this);
@@ -139,66 +113,34 @@ export class Greet extends plugin {
     this.isUserEnabled = this.isUserEnabled.bind(this);
     this.setUserStatus = this.setUserStatus.bind(this);
     this.addLogEntry = this.addLogEntry.bind(this);
-    this.loadRunConfig = this.loadRunConfig.bind(this);
-    this.saveRunConfig = this.saveRunConfig.bind(this);
-    this.scanAndExecuteGreeting = this.scanAndExecuteGreeting.bind(this); // 新的扫描执行方法
-    this.generateNextHourGreetingTime = this.generateNextHourGreetingTime.bind(this); // 新的生成下个小时时间方法
-    this.updateHourlyGreetingTime = this.updateHourlyGreetingTime.bind(this); // 新的每小时更新方法
+    this.scanAndExecuteGreeting = this.scanAndExecuteGreeting.bind(this);
     this.formatToUTCPlus8 = this.formatToUTCPlus8.bind(this);
-    this.loadMessageWaitRecords = this.loadMessageWaitRecords.bind(this);
-    this.saveMessageWaitRecords = this.saveMessageWaitRecords.bind(this);
-    this.startWaitTimerForUser = this.startWaitTimerForUser.bind(this);
-    this.checkAndSendWaitingMessages = this.checkAndSendWaitingMessages.bind(this);
-    this.monitorUserActivity = this.monitorUserActivity.bind(this);
 
     // 机器人启动时自动启动定时器系统
     this.initializeTimerSystem();
     
     // 设置单例实例引用
     Greet.instance = this;
+    this.chatgpt = new chatgpt();
   }
 
   /**
    * 初始化定时器系统
    */
   async initializeTimerSystem() {
-    logger.info('[定时问候] 机器人启动 - 自动初始化定时器系统。');
-    
-    // 立即生成本小时的问候计划
-    await this.updateHourlyGreetingTime();
+    // 每50秒扫描并执行到期的问候任务
+    this.task.push({
+      name: 'scanAndExecuteGreeting',
+      fnc: this.scanAndExecuteGreeting.bind(this),
+      cron: '*/50 * * * * *'
+    });
 
-    // 启动每50秒的扫描定时器
-    this.scanInterval = setInterval(async () => {
-      await this.scanAndExecuteGreeting();
-      await this.checkAndSendWaitingMessages(); // 检查消息等待状态
-    }, 50000); // 每50秒执行一次
-    logger.info('[定时问候] 50秒扫描定时器已启动（包含消息等待检查）。');
-
-    // 计算到下一个整点的时间
-    const now = new Date();
-    const nextFullHour = new Date(now);
-    nextFullHour.setHours(now.getHours() + 1);
-    nextFullHour.setMinutes(0);
-    nextFullHour.setSeconds(0);
-    nextFullHour.setMilliseconds(0);
-    const initialDelay = nextFullHour.getTime() - now.getTime();
-
-    logger.info(`[定时问候] 首次每小时更新将在 ${nextFullHour.toLocaleString('zh-CN')} 进行（${Math.round(initialDelay / 1000)} 秒后）。`);
-
-    // 设置首次每小时更新
-    setTimeout(() => {
-      logger.info('[定时问候] 首次每小时更新触发。');
-      this.updateHourlyGreetingTime();
-      
-      // 启动每小时的定时器
-      this.hourlyInterval = setInterval(async () => {
-        logger.info('[定时问候] 每小时更新定时器触发。');
-        await this.updateHourlyGreetingTime();
-      }, 3600000); // 每小时执行一次
-      logger.info('[定时问候] 每小时更新定时器已启动。');
-    }, initialDelay);
-    
-    logger.info('[定时问候] 定时器系统初始化完成。');
+    // 每小时检查并更新所有用户的问候计划
+    this.task.push({
+      name: 'reviewGreetingPlans',
+      fnc: this.reviewGreetingPlans.bind(this),
+      cron: '0 0 * * * *' // 每小时的0分0秒执行
+    });
   }
 
   /**
@@ -263,15 +205,18 @@ export class Greet extends plugin {
     try {
       // 确保用户配置对象的格式正确
       const cleanConfigs = {}
-      for (const [userId, status] of Object.entries(this.userConfigs)) {
-        if (userId && typeof userId === 'string' && (status === 'on' || status === 'off')) {
-          cleanConfigs[userId] = status
+      for (const [userId, config] of Object.entries(this.userConfigs)) {
+        if (userId && typeof userId === 'string' && typeof config === 'object') {
+          cleanConfigs[userId] = {
+            status: config.status === 'on' ? 'on' : 'off',
+            nextGreetingTimestamp: config.nextGreetingTimestamp || null
+          };
         }
       }
       
       const jsonString = JSON.stringify(cleanConfigs, null, 2)
       fs.writeFileSync(this.configFile, jsonString, 'utf8')
-      logger.info('[定时问候] 用户配置文件保存成功：', cleanConfigs)
+      logger.info('[定时问候] 用户配置文件保存成功。')
       
       // 更新内存中的配置
       this.userConfigs = cleanConfigs
@@ -282,252 +227,109 @@ export class Greet extends plugin {
   }
 
   /**
-   * 加载运行配置文件 (greet_run.json)
-   * @param {boolean} silent 是否静默加载（不输出详细日志）
+   * 每50秒扫描并执行问候任务
    */
-  loadRunConfig(silent = false) {
-    try {
-      if (fs.existsSync(this.runConfigFile)) {
-        const data = fs.readFileSync(this.runConfigFile, 'utf8')
-        
-        // 检查文件内容是否有效
-        if (!data || data.trim() === '') {
-          logger.warn('[定时问候] 运行配置文件为空，将重新创建默认配置。')
-          this.runConfig = {}
-          this.saveRunConfig()
-          return
-        }
-        
-        // 尝试解析JSON，如果失败则提供详细的错误信息
-        try {
-          this.runConfig = JSON.parse(data)
-        } catch (parseError) {
-          logger.error('[定时问候] JSON解析失败，文件内容：', data)
-          logger.error('[定时问候] JSON解析错误详情：', parseError.message)
-          
-          // 备份损坏的文件
-          const backupFile = this.runConfigFile + '.backup.' + Date.now()
-          fs.writeFileSync(backupFile, data, 'utf8')
-          logger.info(`[定时问候] 已备份损坏的配置文件至：${backupFile}`)
-          
-          // 重新创建默认配置
-          this.runConfig = {}
-          this.saveRunConfig()
-          logger.info('[定时问候] 已重新创建默认运行配置。')
-          return
-        }
-        
-        // 只在非静默模式下输出详细日志
-        if (!silent) {
-          const timestamp = this.runConfig.timestamp || '未设置';
-          const shouldSend = this.runConfig.shouldSend ? '是' : '否';
-          const nextGreetingTime = this.runConfig.nextGreetingTime || '未设置';
-          logger.info(`=== 定时问候 ===\n运行时间：${timestamp} | 是否发送：${shouldSend} | 下次问候：${nextGreetingTime}`)
-        }
-      } else {
-        this.runConfig = {}
-        this.saveRunConfig()
-        if (!silent) {
-          logger.info('[定时问候] 运行配置文件不存在，已创建新的默认配置。')
-        }
-      }
-    } catch (error) {
-      logger.error('[定时问候] 加载运行配置文件时出错：', error)
-      logger.error('[定时问候] 错误堆栈：', error.stack)
-      this.runConfig = {}
-      
-      // 如果是文件系统错误，也尝试创建默认配置
-      try {
-        this.saveRunConfig()
-      } catch (saveError) {
-        logger.error('[定时问候] 保存默认配置也失败：', saveError)
-      }
-    }
-  }
+  async scanAndExecuteGreeting() {
+    const now = new Date();
+    const enabledUsers = Object.keys(this.userConfigs).filter(userId => this.userConfigs[userId]?.status === 'on');
 
-  /**
-   * 保存运行配置文件 (greet_run.json)
-   */
-  saveRunConfig() {
-    try {
-      // 确保运行配置对象的所有值都是有效的
-      const cleanConfig = {
-        timestamp: this.runConfig.timestamp || this.formatToUTCPlus8(new Date()),
-        randomMinute: typeof this.runConfig.randomMinute === 'number' ? this.runConfig.randomMinute : 0,
-        shouldSend: Boolean(this.runConfig.shouldSend),
-        hour: typeof this.runConfig.hour === 'number' ? this.runConfig.hour : new Date().getHours(),
-        nextGreetingTime: this.runConfig.nextGreetingTime || null
-      }
-      
-      const jsonString = JSON.stringify(cleanConfig, null, 2)
-      fs.writeFileSync(this.runConfigFile, jsonString, 'utf8')
-      logger.info('[定时问候] 运行配置保存成功：', cleanConfig)
-    } catch (error) {
-      logger.error('[定时问候] 保存运行配置文件时出错：', error)
-      logger.error('[定时问候] 尝试保存的配置：', this.runConfig)
-    }
-  }
-
-  /**
-   * 加载消息等待记录文件 (message_wait.json)
-   */
-  loadMessageWaitRecords() {
-    try {
-      if (fs.existsSync(this.messageWaitFile)) {
-        const data = fs.readFileSync(this.messageWaitFile, 'utf8')
-        
-        // 检查文件内容是否有效
-        if (!data || data.trim() === '') {
-          logger.warn('[定时问候] 消息等待记录文件为空，将重新创建默认配置。')
-          this.messageWaitRecords = {}
-          this.saveMessageWaitRecords()
-          return
-        }
-        
-        // 尝试解析JSON
-        try {
-          this.messageWaitRecords = JSON.parse(data)
-          // logger.info('[定时问候] 消息等待记录文件加载成功，记录数量：', Object.keys(this.messageWaitRecords).length)
-        } catch (parseError) {
-          logger.error('[定时问候] 消息等待记录JSON解析失败，文件内容：', data)
-          logger.error('[定时问候] 消息等待记录JSON解析错误详情：', parseError.message)
-          
-          // 备份损坏的文件
-          const backupFile = this.messageWaitFile + '.backup.' + Date.now()
-          fs.writeFileSync(backupFile, data, 'utf8')
-          logger.info(`[定时问候] 已备份损坏的消息等待记录文件至：${backupFile}`)
-          
-          // 重新创建默认配置
-          this.messageWaitRecords = {}
-          this.saveMessageWaitRecords()
-          logger.info('[定时问候] 已重新创建默认消息等待记录。')
-        }
-      } else {
-        // 如果文件不存在，创建默认配置
-        this.messageWaitRecords = {}
-        this.saveMessageWaitRecords()
-        logger.info('[定时问候] 消息等待记录文件不存在，已创建新的默认配置。')
-      }
-    } catch (error) {
-      logger.error('[定时问候] 加载消息等待记录文件时出错：', error)
-      logger.error('[定时问候] 错误堆栈：', error.stack)
-      this.messageWaitRecords = {}
-      
-      // 尝试创建默认配置
-      try {
-        this.saveMessageWaitRecords()
-      } catch (saveError) {
-        logger.error('[定时问候] 保存默认消息等待记录也失败：', saveError)
-      }
-    }
-  }
-
-  /**
-   * 保存消息等待记录文件 (message_wait.json)
-   */
-  saveMessageWaitRecords() {
-    try {
-      // 确保消息等待记录对象的格式正确
-      const cleanRecords = {}
-      for (const [userId, timestamp] of Object.entries(this.messageWaitRecords)) {
-        if (userId && typeof userId === 'string' && timestamp) {
-          cleanRecords[userId] = timestamp
-        }
-      }
-      
-      const jsonString = JSON.stringify(cleanRecords, null, 2)
-      fs.writeFileSync(this.messageWaitFile, jsonString, 'utf8')
-      logger.info('[定时问候] 消息等待记录文件保存成功，记录数量：', Object.keys(cleanRecords).length)
-      
-      // 更新内存中的记录
-      this.messageWaitRecords = cleanRecords
-    } catch (error) {
-      logger.error('[定时问候] 保存消息等待记录文件时出错：', error)
-      logger.error('[定时问候] 尝试保存的记录：', this.messageWaitRecords)
-    }
-  }
-
-  /**
-   * 记录机器人回复的时间，并启动等待计时器
-   * @param {string} userId 用户ID
-   */
-  startWaitTimerForUser(userId) {
-    const currentTime = this.formatToUTCPlus8(new Date())
-    this.messageWaitRecords[userId] = currentTime
-    this.saveMessageWaitRecords()
-    // logger.info(`[定时问候] 记录机器人回复时间 ${userId}: ${currentTime}，开始等待用户回复。`)
-  }
-
-  /**
-   * 检查并发送等待消息
-   */
-  async checkAndSendWaitingMessages() {
-    const now = new Date()
-    const enabledUsers = Object.keys(this.userConfigs).filter(userId => this.userConfigs[userId] === 'on')
-    
-    if (enabledUsers.length === 0) {
-      return // 没有开启用户，直接返回
-    }
-    
-    const waitingUsersCount = Object.keys(this.messageWaitRecords).length
-    // logger.info(`[定时问候] 开始检查消息等待状态，共 ${enabledUsers.length} 个开启用户，等待中用户数: ${waitingUsersCount}`)
-    
-    let processedCount = 0
-    let sentCount = 0
-    let cancelledCount = 0
-    
     for (const userId of enabledUsers) {
-      if (this.messageWaitRecords[userId]) {
-        processedCount++
-        const lastMessageTime = new Date(this.messageWaitRecords[userId])
-        const timeDifference = now.getTime() - lastMessageTime.getTime()
-        const minutesDifference = Math.floor(timeDifference / (1000 * 60))
+      const userConfig = this.userConfigs[userId];
+      if (userConfig.nextGreetingTimestamp && now.getTime() > userConfig.nextGreetingTimestamp) {
+        logger.info(`[定时问候] 用户 ${userId} 的问候时间已到，准备发送问候...`);
         
-        // 生成5-30分钟的随机等待时间
-        const randomWaitMinutes = Math.floor(Math.random() * 26) + 5 // 5到30分钟的随机等待时间
+        // 生成并发送问候消息
+        const currentTime = this.formatToUTCPlus8(new Date());
+        const message = await this.generateContextualGreeting(userId, currentTime);
+        if (message) {
+          await this.sendActualGreeting(userId, message, true);
+        }
         
-        logger.info(`[定时问候] 用户 ${userId} 机器人最后回复时间: ${this.messageWaitRecords[userId]}, 已过 ${minutesDifference} 分钟, 等待阈值: ${randomWaitMinutes} 分钟`)
+        // 任务执行后清除时间戳，等待AI下一次指令
+        userConfig.nextGreetingTimestamp = null;
+        this.saveConfig();
+        logger.info(`[定时问候] 用户 ${userId} 的问候任务已执行并清除。`);
+      }
+    }
+  }
 
-        if (minutesDifference >= randomWaitMinutes) {
-          logger.info(`[定时问候] 用户 ${userId} 已等待 ${minutesDifference} 分钟 (阈值: ${randomWaitMinutes} 分钟)，进行概率检测...`)
-          
-          // 增加80%的概率检测
-          if (Math.random() < 0.8) {
-            logger.info(`[定时问候] 用户 ${userId} 通过80%概率检测，准备发送询问消息`)
-            
-            // 生成询问消息
-            const currentTimeStr = now.toLocaleString('zh-CN')
-            const waitingPrompt = `【system】：现在时间是${currentTimeStr}，对话人已经${minutesDifference}分钟没有回复消息，在这样的情境下请根据上下文内容，模拟问候他在做什么，或者继续说你要说的话。`
-            
-            // 发送询问消息，且不记录本次发送的时间
-            await this.sendActualGreeting(userId, waitingPrompt, false)
-            sentCount++
-            logger.info(`[定时问候] 已向用户 ${userId} 发送等待询问消息`)
-            
-            // 记录日志
-            this.addLogEntry({
-              type: 'waitingMessage',
-              action: 'waitingInquirySent',
-              userId: userId,
-              waitMinutes: minutesDifference,
-              randomThreshold: randomWaitMinutes,
-              messageContent: waitingPrompt.substring(0, 200) + '...',
-              sentAt: this.formatToUTCPlus8(now)
-            })
-            
-            // 清除该用户的等待记录，避免重复发送
-            delete this.messageWaitRecords[userId]
-            this.saveMessageWaitRecords()
+  /**
+   * 每小时调用AI，为每个开启的用户征求问候计划的调整意见
+   */
+  async reviewGreetingPlans() {
+    logger.info('[定时问候] === 开始每小时检查所有用户的问候计划 ===');
+    const enabledUsers = Object.keys(this.userConfigs).filter(userId => this.userConfigs[userId]?.status === 'on');
+
+    for (const userId of enabledUsers) {
+      try {
+        const userConfig = this.userConfigs[userId];
+        const plan = userConfig.nextGreetingTimestamp 
+          ? `计划在 ${new Date(userConfig.nextGreetingTimestamp).toLocaleString('zh-CN')} 左右`
+          : '当前没有主动问候计划';
+
+        const context = await this.getUserConversationContext(userId);
+        const history = context.recentMessages.map(item => `${item.role}: ${item.content}`).join('\n');
+        
+        const prompt = `【背景】我是你的AI助手，正在管理对用户 ${userId} 的主动问候计划。\n【当前计划】${plan}。\n【历史摘要】\n${history}\n【任务】请根据我们的历史互动，判断是否需要调整主动问候计划。如果需要，请在回复的最后用 {{消息意愿:分钟数}} 格式给出新的计划（-1代表取消所有计划）。如果认为当前计划无需变动，则不要包含任何“消息意愿”标记。`;
+
+        logger.info(`[定时问候] 正在为用户 ${userId} 询问AI调整计划...`);
+        
+        // 创建一个临时的 e 对象来调用 getResponse
+        const dummyE = { user_id: userId, isPrivate: true };
+        const aiResponse = await this.chatgpt.getResponse(prompt, dummyE);
+
+        if (aiResponse && aiResponse.text) {
+          const willingnessRegex = /\{\{消息意愿:(-?\d+)\}\}/;
+          const match = aiResponse.text.match(willingnessRegex);
+
+          if (match) {
+            const minutes = parseInt(match[1], 10);
+            logger.info(`[定时问候] AI为用户 ${userId} 提出了新的计划: ${minutes}分钟`);
+            this.updateGreetingPlan(userId, minutes);
           } else {
-            logger.info(`[定时问候] 用户 ${userId} 未通过80%的概率检测，本次跳过，等待下次检查。`)
+            logger.info(`[定时问候] AI认为用户 ${userId} 的计划无需调整。`);
           }
         }
+      } catch (error) {
+        logger.error(`[定时问候] 为用户 ${userId} 检查计划时出错:`, error);
       }
     }
-    
-    if (processedCount > 0) {
-      logger.info(`[定时问候] 等待检查完成: 处理 ${processedCount} 个等待用户, 发送询问 ${sentCount} 个, 取消 ${cancelledCount} 个`)
+    logger.info('[定时问候] === 每小时计划检查结束 ===');
+  }
+
+  /**
+   * 更新指定用户的问候计划
+   * @param {string} userId 用户ID
+   * @param {number} minutes 分钟数，-1表示取消
+   */
+  updateGreetingPlan(userId, minutes) {
+    if (!this.userConfigs[userId]) {
+      this.userConfigs[userId] = { status: 'off', nextGreetingTimestamp: null };
     }
+    
+    // 兼容旧的配置格式：如果配置是字符串，转换为对象格式
+    if (typeof this.userConfigs[userId] === 'string') {
+      const oldStatus = this.userConfigs[userId];
+      this.userConfigs[userId] = { 
+        status: oldStatus, 
+        nextGreetingTimestamp: null 
+      };
+      logger.info(`[定时问候] 自动升级用户 ${userId} 的配置格式`);
+    }
+    
+    const userConfig = this.userConfigs[userId];
+
+    if (minutes === -1) {
+      userConfig.nextGreetingTimestamp = null;
+      logger.info(`[定时问候] 已为用户 ${userId} 取消所有主动问候计划。`);
+    } else if (minutes > 0) {
+      const nextTime = new Date().getTime() + minutes * 60 * 1000;
+      userConfig.nextGreetingTimestamp = nextTime;
+      logger.info(`[定时问候] 已为用户 ${userId} 设置新的问候时间: ${new Date(nextTime).toLocaleString('zh-CN')}`);
+    }
+    // 如果 minutes 为 0 或其他无效值，则不作处理
+
+    this.saveConfig();
   }
 
   /**
@@ -555,196 +357,18 @@ export class Greet extends plugin {
   }
 
   /**
-   * 生成下个小时的随机问候时间
-   * @returns {Date} 下个小时的随机时间
-   */
-  generateNextHourGreetingTime() {
-    const now = new Date();
-    const nextHour = new Date(now);
-    nextHour.setHours(now.getHours() + 1);
-    
-    // 生成随机分钟数（1-59）
-    const randomMinute = Math.floor(Math.random() * 59) + 1;
-    nextHour.setMinutes(randomMinute);
-    nextHour.setSeconds(0);
-    nextHour.setMilliseconds(0);
-    
-    logger.info(`[定时问候] 生成下个小时随机时间: ${nextHour.toLocaleString('zh-CN')}`);
-    return nextHour;
-  }
-
-  /**
    * 检查指定用户是否已开启定时问候
    * @param {string} userId 用户ID
    * @returns {boolean} 是否开启
    */
   isUserEnabled(userId) {
-    const isEnabled = this.userConfigs[userId] === 'on'
-    // logger.info(`[定时问候] 检查用户 ${userId} 状态：${isEnabled ? '已开启' : '未开启'}`)
+    // 兼容旧格式：如果是字符串，检查是否为 'on'
+    if (typeof this.userConfigs[userId] === 'string') {
+      return this.userConfigs[userId] === 'on';
+    }
+    // 新格式：检查 status 字段
+    const isEnabled = this.userConfigs[userId]?.status === 'on'
     return isEnabled
-  }
-
-  /**
-   * 每50秒扫描并执行问候任务
-   */
-  async scanAndExecuteGreeting() {
-    // 自动获取机器人实例（如果还没有的话）
-    if (!this.bot) {
-      try {
-        // 尝试从全局获取机器人实例
-        if (typeof Bot !== 'undefined' && Bot.uin) {
-          this.bot = Bot;
-          // logger.info('[定时问候] 自动获取到机器人实例。');
-        } else {
-          // logger.info('[定时问候] 机器人实例未就绪，跳过扫描。');
-          return;
-        }
-      } catch (error) {
-        // logger.info('[定时问候] 获取机器人实例失败，跳过扫描。');
-        return;
-      }
-    }
-
-    // 重新加载运行配置，确保使用最新状态（静默模式）
-    this.loadRunConfig(true);
-    
-    if (!this.runConfig.shouldSend || !this.runConfig.nextGreetingTime) {
-      // logger.info('[定时问候] 无问候计划或时间未设置，跳过扫描。');
-      return;
-    }
-
-    const now = new Date();
-    const scheduledTime = new Date(this.runConfig.nextGreetingTime);
-    
-    // 检查当前时间的分钟是否匹配
-    if (now.getHours() === scheduledTime.getHours() && now.getMinutes() === scheduledTime.getMinutes()) {
-      // 防重复发送：检查是否在同一分钟内已经发送过
-      const currentTimeKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}-${now.getHours()}-${now.getMinutes()}`;
-      if (this.lastGreetingTime === currentTimeKey) {
-        logger.info(`[定时问候] 该分钟内已发送过问候，跳过重复发送。时间: ${now.toLocaleString('zh-CN')}`);
-        return;
-      }
-      
-      logger.info(`[定时问候] 时间匹配！当前时间: ${now.toLocaleString('zh-CN')}, 计划时间: ${scheduledTime.toLocaleString('zh-CN')}`);
-      
-      // 记录此次问候时间，防止重复
-      this.lastGreetingTime = currentTimeKey;
-      
-      // 执行问候
-      await this.executeGreetingToAllUsers();
-      
-      // 立即更新为下个小时的随机时间
-      const nextGreetingTime = this.generateNextHourGreetingTime();
-      this.runConfig.nextGreetingTime = this.formatToUTCPlus8(nextGreetingTime);
-      this.runConfig.timestamp = this.formatToUTCPlus8(now);
-      this.runConfig.hour = nextGreetingTime.getHours();
-      this.runConfig.randomMinute = nextGreetingTime.getMinutes();
-      this.saveRunConfig();
-      
-      logger.info(`[定时问候] 已更新下次问候时间为: ${nextGreetingTime.toLocaleString('zh-CN')}`);
-    }
-  }
-
-  /**
-   * 向所有开启用户执行问候
-   */
-  async executeGreetingToAllUsers() {
-    logger.info('[定时问候] 开始向所有用户发送问候。');
-    
-    const enabledUsers = Object.keys(this.userConfigs).filter(userId => this.userConfigs[userId] === 'on');
-    if (enabledUsers.length === 0) {
-      logger.info('[定时问候] 没有用户开启，跳过问候发送。');
-      return;
-    }
-
-    const nowForMessage = new Date();
-    const currentTime = nowForMessage.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-    
-    for (const userId of enabledUsers) {
-      // 为每个用户生成个性化的问候消息
-      const personalizedGreeting = await this.generateContextualGreeting(userId, currentTime);
-      await this.sendActualGreeting(userId, personalizedGreeting);
-      logger.info(`[定时问候] 已向用户 ${userId} 发送个性化定时问候。`);
-      this.addLogEntry({
-        type: 'greeting',
-        action: 'scheduledGreetingSent',
-        userId: userId,
-        messageContent: personalizedGreeting.substring(0, 200) + '...', // 只记录前200字符
-        sentAt: this.formatToUTCPlus8(new Date())
-      });
-    }
-    logger.info('[定时问候] 所有用户问候发送完毕。');
-  }
-
-  /**
-   * 每小时更新问候时间（概率判断）
-   */
-  async updateHourlyGreetingTime() {
-    logger.info('[定时问候] === 每小时更新任务开始 ===');
-    
-    const now = new Date();
-    const currentHour = now.getHours();
-    let shouldSend = false;
-    let probability = 0;
-
-    // 根据时间段确定概率
-    if (currentHour == 7 || currentHour == 22) {
-      probability = 0.85;
-      shouldSend = Math.random() < probability;
-      logger.info(`[定时问候] 当前小时 ${currentHour} 处于 7点或22点时间段，概率 ${probability * 100}%。`);
-    }
-    else if (currentHour >= 8 && currentHour < 22) {
-      probability = 0.20;
-      shouldSend = Math.random() < probability;
-      logger.info(`[定时问候] 当前小时 ${currentHour} 处于 8-22点时间段，概率 ${probability * 100}%。`);
-    }
-    else if ((currentHour >= 23 && currentHour <= 23) || (currentHour >= 0 && currentHour < 7)) { 
-      probability = 0.05;
-      shouldSend = Math.random() < probability;
-      logger.info(`[定时问候] 当前小时 ${currentHour} 处于 23-次日7点时间段，概率 ${probability * 100}%。`);
-    } else {
-      logger.info(`[定时问候] 当前小时 ${currentHour} 不在任何预设问候时间段内，不发送问候。`);
-      shouldSend = false;
-    }
-
-    // 生成这个小时的随机分钟数
-    let randomMinute = shouldSend ? Math.floor(Math.random() * 59) + 1 : 0;
-    
-    const scheduledTime = new Date();
-    scheduledTime.setHours(currentHour);
-    scheduledTime.setMinutes(randomMinute);
-    scheduledTime.setSeconds(0);
-    scheduledTime.setMilliseconds(0);
-
-    // 如果计划时间已经过去，则安排到下一个小时
-    if (scheduledTime.getTime() <= now.getTime()) {
-      scheduledTime.setHours(currentHour + 1);
-      logger.info(`[定时问候] 原定时间已过，调整到下一小时：${scheduledTime.toLocaleString('zh-CN')}`);
-    }
-
-    // 更新运行配置
-    this.runConfig = {
-      timestamp: this.formatToUTCPlus8(now),
-      randomMinute: scheduledTime.getMinutes(),
-      shouldSend: shouldSend,
-      hour: scheduledTime.getHours(),
-      nextGreetingTime: shouldSend ? this.formatToUTCPlus8(scheduledTime) : null
-    };
-
-    this.addLogEntry({
-      type: 'probabilityCheck',
-      userId: 'global',
-      hour: currentHour,
-      randomMinute: randomMinute,
-      probability: probability,
-      passed: shouldSend,
-      scheduled: shouldSend,
-      currentTime: this.formatToUTCPlus8(now)
-    });
-
-    this.saveRunConfig();
-    logger.info(`[定时问候] 本小时问候计划: ${shouldSend ? `将在 ${scheduledTime.toLocaleString('zh-CN')} 发送问候` : '不发送问候'}`);
-    logger.info('[定时问候] === 每小时更新任务结束 ===');
   }
 
   /**
@@ -754,62 +378,24 @@ export class Greet extends plugin {
    */
   async getUserConversationContext(targetQQ) {
     try {
-      // 创建一个模拟的事件对象来获取对话上下文
-      const mockEvent = {
-        isPrivate: true,
-        user_id: targetQQ,
-        sender: { user_id: targetQQ },
-        isGroup: false
-      }
-      
-      // 检查是否存在对话历史
-      const conversationKey = `CHATGPT:CONVERSATIONS:${targetQQ}`
-      const conversationData = await redis.get(conversationKey)
+      const key = `CHATGPT:CONVERSATIONS_GEMINI:${targetQQ}`
+      const conversationData = await redis.get(key)
       
       if (conversationData) {
         const conversation = JSON.parse(conversationData)
-        logger.info(`[定时问候] 用户 ${targetQQ} 存在对话历史，消息数: ${conversation.messages?.length || 0}`)
-        
-        // 获取最近的几条消息作为上下文
         const recentMessages = conversation.messages?.slice(-5) || []
-        const lastUserMessage = recentMessages
-          .filter(msg => msg.role === 'user')
-          .pop()?.content || '无最近消息'
-        
-        const lastAssistantMessage = recentMessages
-          .filter(msg => msg.role === 'assistant')
-          .pop()?.content || '无AI回复'
         
         return {
           hasHistory: true,
-          messageCount: conversation.messages?.length || 0,
-          lastUserMessage: lastUserMessage.substring(0, 100), // 截取前100字符
-          lastAssistantMessage: lastAssistantMessage.substring(0, 100),
-          recentMessages,
-          conversationAge: conversation.ctime ? new Date(conversation.ctime) : null
+          recentMessages: recentMessages,
         }
       } else {
         logger.info(`[定时问候] 用户 ${targetQQ} 无对话历史`)
-        return {
-          hasHistory: false,
-          messageCount: 0,
-          lastUserMessage: null,
-          lastAssistantMessage: null,
-          recentMessages: [],
-          conversationAge: null
-        }
+        return { hasHistory: false, recentMessages: [] }
       }
     } catch (error) {
       logger.error(`[定时问候] 获取用户 ${targetQQ} 对话上下文失败:`, error)
-      return {
-        hasHistory: false,
-        messageCount: 0,
-        lastUserMessage: null,
-        lastAssistantMessage: null,
-        recentMessages: [],
-        conversationAge: null,
-        error: error.message
-      }
+      return { hasHistory: false, recentMessages: [], error: error.message }
     }
   }
 
@@ -820,37 +406,25 @@ export class Greet extends plugin {
    * @returns {Promise<string>} 返回个性化的问候消息
    */
   async generateContextualGreeting(targetQQ, currentTime) {
-    const context = await this.getUserConversationContext(targetQQ)
-    
-    let greetingMessage = this.greetingMessageTemplate.replace('{currentTime}', currentTime)
-    
-    // 如果有对话历史，添加上下文信息
-    if (context.hasHistory && context.messageCount > 0) {
-      let contextualInfo = `\n\n【上下文信息】`
-      contextualInfo += `\n- 历史对话次数: ${context.messageCount}`
+    try {
+      const context = await this.getUserConversationContext(targetQQ);
+      const history = context.recentMessages.map(item => `${item.role}: ${item.content}`).join('\n');
       
-      if (context.conversationAge) {
-        const daysSinceStart = Math.floor((new Date() - context.conversationAge) / (1000 * 60 * 60 * 24))
-        contextualInfo += `\n- 对话开始于: ${daysSinceStart}天前`
+      const prompt = `现在是 ${currentTime}。基于我们过去的对话记录:\n${history}\n\n请你以自然的、朋友般的口吻，主动发起一段新的对话。`;
+
+      // 直接调用 chatgpt 实例的方法来获取AI回复
+      const dummyE = { user_id: targetQQ, isPrivate: true };
+      const res = await this.chatgpt.getResponse(prompt, dummyE);
+      
+      if (res && res.text) {
+        // 移除AI回复中可能误带的意愿标记，因为这里的意愿应在对话中产生
+        return res.text.replace(/\{\{消息意愿:(-?\d+)\}\}/, '').trim();
       }
-      
-      if (context.lastUserMessage) {
-        contextualInfo += `\n- 用户最后说: "${context.lastUserMessage}${context.lastUserMessage.length > 97 ? '...' : ''}"`
-      }
-      
-      if (context.lastAssistantMessage) {
-        contextualInfo += `\n- AI最后回复: "${context.lastAssistantMessage}${context.lastAssistantMessage.length > 97 ? '...' : ''}"`
-      }
-      
-      contextualInfo += `\n\n请根据这些历史对话信息，生成更有针对性和连续性的问候。可以询问之前聊天中提到的话题，或者自然地延续之前的对话内容。`
-      
-      greetingMessage += contextualInfo
-      logger.info(`[定时问候] 为用户 ${targetQQ} 生成了包含上下文的个性化问候`)
-    } else {
-      logger.info(`[定时问候] 用户 ${targetQQ} 无对话历史，使用标准问候模板`)
+      return '你好呀，最近怎么样？'; // Fallback
+    } catch (error) {
+      logger.error('生成个性化问候消息失败:', error);
+      return '你好呀！'; // Fallback
     }
-    
-    return greetingMessage
   }
 
   /**
@@ -860,7 +434,21 @@ export class Greet extends plugin {
    */
   setUserStatus(userId, status) {
     logger.info(`[定时问候] 设置用户 ${userId} 状态为：${status}`)
-    this.userConfigs[userId] = status
+    if (!this.userConfigs[userId]) {
+      this.userConfigs[userId] = { status: 'off', nextGreetingTimestamp: null };
+    }
+    
+    // 兼容旧的配置格式：如果配置是字符串，转换为对象格式
+    if (typeof this.userConfigs[userId] === 'string') {
+      const oldStatus = this.userConfigs[userId];
+      this.userConfigs[userId] = { 
+        status: oldStatus, 
+        nextGreetingTimestamp: null 
+      };
+      logger.info(`[定时问候] 自动升级用户 ${userId} 的配置格式`);
+    }
+    
+    this.userConfigs[userId].status = status;
     this.saveConfig()
   }
 
@@ -869,35 +457,7 @@ export class Greet extends plugin {
    * @param {object} e 消息事件对象
    */
   async monitorUserActivity(e) {
-    // 只监听私聊消息，且用户已开启定时问候功能
-    if (e.isPrivate && this.isUserEnabled(e.sender.user_id.toString())) {
-      // 如果不是定时问候相关的命令，则记录用户活动
-      // 增加对 e.msg 的类型检查，确保其为字符串再调用 startsWith
-      if (!(typeof e.msg === 'string' && (e.msg.startsWith('#开启定时问候') || e.msg.startsWith('#关闭定时问候')))) {
-        const userId = e.sender.user_id.toString()
-        
-        // 检查用户是否在等待状态中
-        if (this.messageWaitRecords[userId]) {
-          logger.info(`[定时问候] 用户 ${userId} 在等待期间回复了消息，取消预定的询问问候`)
-          
-          // 记录取消事件到日志
-          this.addLogEntry({
-            type: 'waitingMessage',
-            action: 'waitingInquiryCancelled',
-            userId: userId,
-            reason: 'userRepliedDuringWait',
-            cancelledAt: this.formatToUTCPlus8(new Date())
-          })
-          
-          // 清除等待记录，取消询问问候
-          delete this.messageWaitRecords[userId]
-          this.saveMessageWaitRecords()
-        }
-        
-        // 用户回复后，重新启动等待计时器
-        this.startWaitTimerForUser(userId)
-      }
-    }
+    // 该函数在新的AI驱动模式下不再需要，但保留以备将来使用
     return false // 返回false，不阻止其他插件处理该消息
   }
 
@@ -914,32 +474,10 @@ export class Greet extends plugin {
     this.setUserStatus(userId, 'on')
     logger.info(`[定时问候] 用户 ${userId} 发送 #开启定时问候 命令。`)
 
-    // 立即为当前发送命令的用户发送一条问候 (无视其他条件) - 已注释
-    // const nowForMessage = new Date()
-    // const currentTime = nowForMessage.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-    // const greetingMessage = this.greetingMessageTemplate.replace('{currentTime}', currentTime);
-    // await this.sendActualGreeting(userId, greetingMessage)
-    // logger.info(`[定时问候] 已向用户 ${userId} 立即发送问候 (通过 startGreeting 命令触发)。`)
-    // this.addLogEntry({
-    //   type: 'greeting',
-    //   action: 'immediateGreeting',
-    //   userId: userId,
-    //   messageContent: greetingMessage,
-    //   sentAt: this.formatToUTCPlus8(new Date()) // 保存为UTC+8时间
-    // })
-
-    // 显示下次问候时间
-    let nextScheduledTimeDisplay = "下次问候时间将根据每小时随机确定";
-    this.loadRunConfig(); // 确保加载最新配置
-    if (this.runConfig.shouldSend && this.runConfig.nextGreetingTime) {
-        const scheduledDate = new Date(this.runConfig.nextGreetingTime);
-        nextScheduledTimeDisplay = `下次问候预计时间为：${scheduledDate.toLocaleString('zh-CN')}。`;
-    }
-
     if (wasEnabled) {
       e.reply(`您已经开启了定时问候功能。`, true)
     } else {
-      e.reply(`定时问候已开启`, true)
+      e.reply(`定时问候已开启，现在将由AI根据对话情况决定何时主动找你聊天。`, true)
     }
     logger.info(`[定时问候] 用户 ${userId} 已成功处理开启命令。`)
   }
@@ -960,43 +498,11 @@ export class Greet extends plugin {
     }
 
     this.setUserStatus(userId, 'off')
-    logger.info(`[定时问候] 用户 ${userId} 已禁用定时问候。`)
-    
-    const enabledUsers = Object.values(this.userConfigs).filter(status => status === 'on')
-    logger.info(`[定时问候] 剩余开启用户数：${enabledUsers.length}`)
-    
-    // 注意：定时器系统保持运行，只是不会给关闭的用户发送消息
-    // 如果需要完全停止系统，可以取消下面的注释
-    // if (enabledUsers.length === 0) {
-    //   // 如果没有用户开启，停止所有定时器
-    //   if (this.scanInterval) {
-    //     clearInterval(this.scanInterval);
-    //     this.scanInterval = null;
-    //     logger.info('[定时问候] 50秒扫描定时器已停止。');
-    //   }
-    //   if (this.hourlyInterval) {
-    //     clearInterval(this.hourlyInterval);
-    //     this.hourlyInterval = null;
-    //     logger.info('[定时问候] 每小时更新定时器已停止。');
-    //   }
-    //   // 清除心跳定时器
-    //   if (this.heartbeatInterval) {
-    //     clearInterval(this.heartbeatInterval);
-    //     this.heartbeatInterval = null;
-    //     logger.info('[定时问候] 清除了心跳日志定时器。');
-    //   }
-    //   this.bot = null // 清除机器人实例
-    //   // 清空运行配置文件
-    //   this.runConfig = {};
-    //   this.saveRunConfig();
-    //   logger.info('[定时问候] greet_run.json 已清空。');
-    // } else {
-    //   logger.info('[定时问候] 定时器系统仍在运行，因为仍有其他用户开启。')
-    // }
-    
-    logger.info('[定时问候] 定时器系统继续运行，但不会向您发送问候。');
-    e.reply('定时问候已关闭', true) // 回复用户定时任务已关闭
+    // 同时取消任何待处理的问候
+    this.updateGreetingPlan(userId, -1);
+
     logger.info(`[定时问候] 用户 ${userId} 的定时问候已成功关闭。`)
+    e.reply('定时问候已关闭', true) 
   }
 
   /**
@@ -1009,8 +515,12 @@ export class Greet extends plugin {
     logger.info(`[定时问候] 准备为QQ: ${targetQQ} 发送实际问候消息。`)
 
     if (!this.bot) {
-      logger.error("[定时问候] 机器人实例未设置，无法发送问候消息。")
-      return
+      if (typeof Bot !== 'undefined' && Bot.uin) {
+        this.bot = Bot;
+      } else {
+        logger.error("[定时问候] 机器人实例未设置，无法发送问候消息。")
+        return
+      }
     }
     
     // 获取用户信息（如果可能的话）
@@ -1039,24 +549,13 @@ export class Greet extends plugin {
       source: null, // 没有引用消息
       atme: false, // 没有@机器人
       atBot: false, // 没有@机器人
-      // 关键：重写 reply 方法，使其能够通过机器人实例发送私聊消息
       reply: async (msg, quote, data) => {
-        logger.info(`[定时问候] DummyEvent Reply 触发，准备通过bot.pickFriend().sendMsg发送至 ${targetQQ}。`)
         try {
-          // 使用 this.bot.pickFriend(targetQQ).sendMsg(msg) 来发送私聊消息
           await this.bot.pickFriend(targetQQ).sendMsg(msg)
-          logger.info(`[定时问候] 已通过bot.pickFriend().sendMsg发送消息至 ${targetQQ}: ${typeof msg === 'string' ? msg.substring(0, 100) : '[复杂消息]'}`)
         } catch (error) {
           logger.error(`[定时问候] 发送消息至 ${targetQQ} 失败:`, error)
         }
       },
-      // 添加运行时处理器支持（如果需要的话）
-      runtime: {
-        handler: {
-          has: () => false,
-          call: () => null
-        }
-      }
     }
 
     const chat = new chatgpt(dummyEvent) // 创建 chatgpt 实例
@@ -1065,12 +564,6 @@ export class Greet extends plugin {
       await chat.abstractChat(dummyEvent, message, 'gemini')
       logger.info(`[定时问候] abstractChat 调用完成为 ${targetQQ}。`)
       
-      // AI回复后，根据参数决定是否更新用户的消息时间
-      if (recordTime) {
-        this.startWaitTimerForUser(targetQQ)
-      } else {
-        logger.info(`[定时问候] 本次为等待问候，不记录机器人回复时间以避免循环。`)
-      }
     } catch (error) {
       logger.error(`[定时问候] 调用 abstractChat 为 ${targetQQ} 时出错:`, error)
     }

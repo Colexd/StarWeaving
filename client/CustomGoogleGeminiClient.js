@@ -174,6 +174,9 @@ export class CustomGoogleGeminiClient extends GoogleGeminiClientModule.GoogleGem
     let history = await this.getHistory(opt.parentMessageId)
     let systemMessage = opt.system
 
+    // 检测API类型
+    const isThirdPartyProxy = this._key.startsWith('sk-');
+    
     // 增强的诊断日志
     try {
       const diagnosticInfo = {
@@ -182,6 +185,7 @@ export class CustomGoogleGeminiClient extends GoogleGeminiClientModule.GoogleGem
         hasAudio: !!(opt.audio && opt.audio.data),
         historyLength: history.length,
         promptLength: text?.length || 0,
+        apiType: isThirdPartyProxy ? 'third-party' : 'official'
       };
       if (opt.image) {
         diagnosticInfo.imageSize = opt.image.length;
@@ -189,138 +193,242 @@ export class CustomGoogleGeminiClient extends GoogleGeminiClientModule.GoogleGem
       if (opt.audio && opt.audio.data) {
         diagnosticInfo.audioSize = opt.audio.data.length;
       }
-      // logger.info(`[Gemini Client] 发送Gemini请求。详情: ${JSON.stringify(diagnosticInfo)}`);
+      console.log(`[Gemini Client] 发送请求，API类型: ${isThirdPartyProxy ? '第三方反代' : '官方Google API'}`);
     } catch (logError) {
-      logger.warn(`[Gemini Client] 记录诊断日志时出错: ${logError.message}`);
+      console.warn(`[Gemini Client] 记录诊断日志时出错: ${logError.message}`);
     }
 
     const idThis = crypto.randomUUID()
     const idModel = crypto.randomUUID()
-    if (opt.functionResponse && !typeof Array.isArray(opt.functionResponse)) {
+    
+    if (opt.functionResponse && !Array.isArray(opt.functionResponse)) {
       opt.functionResponse = [opt.functionResponse]
     }
-    const thisMessage = opt.functionResponse?.length > 0
-      ? {
-          role: 'user',
-          parts: opt.functionResponse.map(i => {
-            return {
-              functionResponse: i
+
+    // 根据API类型构建不同的消息格式
+    let body, url;
+    
+    if (isThirdPartyProxy) {
+      // 第三方反代通常使用OpenAI兼容格式
+      url = `${this.baseUrl}/v1/chat/completions`;
+      
+      // 转换历史消息格式
+      const messages = [];
+      
+      // 添加系统消息
+      if (systemMessage) {
+        messages.push({
+          role: 'system',
+          content: systemMessage
+        });
+      }
+      
+      // 转换历史消息
+      for (const msg of history) {
+        if (msg.role === 'user') {
+          let content = '';
+          if (msg.parts) {
+            for (const part of msg.parts) {
+              if (part.text) content += part.text;
             }
-          }),
-          id: idThis,
-          parentMessageId: opt.parentMessageId || undefined
+          }
+          if (content) {
+            messages.push({
+              role: 'user',
+              content: content
+            });
+          }
+        } else if (msg.role === 'model') {
+          let content = '';
+          if (msg.parts) {
+            for (const part of msg.parts) {
+              if (part.text) content += part.text;
+            }
+          }
+          if (content) {
+            messages.push({
+              role: 'assistant',
+              content: content
+            });
+          }
         }
-      : {
+      }
+      
+      // 添加当前消息
+      if (text || opt.functionResponse?.length > 0) {
+        const currentContent = text || '';
+        messages.push({
           role: 'user',
-          parts: text ? [{ text }] : [],
-          id: idThis,
-          parentMessageId: opt.parentMessageId || undefined
-        }
-    if (opt.image) {
-      thisMessage.parts.push({
-        inline_data: {
-          mime_type: 'image/jpeg',
-          data: opt.image
-        }
-      })
-    }
-    if (opt.audio && opt.audio.data) {
-      thisMessage.parts.push({
-        inline_data: {
-          mime_type: opt.audio.mimeType || 'audio/amr',
-          data: opt.audio.data
-        }
-      });
-    }
-    history.push(_.cloneDeep(thisMessage))
-    let url = `${this.baseUrl}/v1beta/models/${this.model}:generateContent`
-    let body = {
-      contents: history,
-      safetySettings: [
-        {
-          category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-          threshold: HarmBlockThreshold.OFF
-        },
-        {
-          category: HarmCategory.HARM_CATEGORY_HARASSMENT,
-          threshold: HarmBlockThreshold.OFF
-        },
-        {
-          category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-          threshold: HarmBlockThreshold.OFF
-        },
-        {
-          category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-          threshold: HarmBlockThreshold.OFF
-        },
-        {
-          category: HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
-          threshold: HarmBlockThreshold.BLOCK_NONE
-        }
-      ],
-      generationConfig: {
-        maxOutputTokens: opt.maxOutputTokens || 4096,
+          content: currentContent
+        });
+      }
+      
+      body = {
+        model: this.model || 'gemini-1.5-pro',
+        messages: messages,
+        max_tokens: opt.maxOutputTokens || 4096,
         temperature: opt.temperature || 0.9,
-        topP: opt.topP || 0.95,
-        topK: opt.tokK || 16
-      },
-      tools: []
-    }
-    if (systemMessage) {
-      body.system_instruction = {
-        parts: {
-          text: systemMessage
+        top_p: opt.topP || 0.95,
+        stream: false
+      };
+      
+    } else {
+      // 官方Google API格式（保持原有逻辑）
+      url = `${this.baseUrl}/v1beta/models/${this.model}:generateContent`;
+      
+      const thisMessage = opt.functionResponse?.length > 0
+        ? {
+            role: 'user',
+            parts: opt.functionResponse.map(i => {
+              return {
+                functionResponse: i
+              }
+            }),
+            id: idThis,
+            parentMessageId: opt.parentMessageId || undefined
+          }
+        : {
+            role: 'user',
+            parts: text ? [{ text }] : [{ text: '' }],
+            id: idThis,
+            parentMessageId: opt.parentMessageId || undefined
+          }
+          
+      if (opt.image) {
+        thisMessage.parts.push({
+          inline_data: {
+            mime_type: 'image/jpeg',
+            data: opt.image
+          }
+        })
+      }
+      if (opt.audio && opt.audio.data) {
+        thisMessage.parts.push({
+          inline_data: {
+            mime_type: opt.audio.mimeType || 'audio/amr',
+            data: opt.audio.data
+          }
+        });
+      }
+      
+      // 确保parts不为空
+      if (thisMessage.parts.length === 0) {
+        thisMessage.parts.push({ text: '' });
+      }
+      
+      history.push(_.cloneDeep(thisMessage))
+      
+      body = {
+        contents: history,
+        safetySettings: [
+          {
+            category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+            threshold: HarmBlockThreshold.OFF
+          },
+          {
+            category: HarmCategory.HARM_CATEGORY_HARASSMENT,
+            threshold: HarmBlockThreshold.OFF
+          },
+          {
+            category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+            threshold: HarmBlockThreshold.OFF
+          },
+          {
+            category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            threshold: HarmBlockThreshold.OFF
+          },
+          {
+            category: HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
+            threshold: HarmBlockThreshold.BLOCK_NONE
+          }
+        ],
+        generationConfig: {
+          maxOutputTokens: opt.maxOutputTokens || 4096,
+          temperature: opt.temperature || 0.9,
+          topP: opt.topP || 0.95,
+          topK: opt.tokK || 16
+        },
+        tools: []
+      }
+      
+      if (systemMessage) {
+        body.system_instruction = {
+          parts: [{
+            text: systemMessage
+          }]
         }
       }
-    }
-    if (this.tools?.length > 0) {
-      body.tools.push({
-        function_declarations: this.tools.map(tool => tool.function())
+      
+      if (this.tools?.length > 0) {
+        body.tools.push({
+          function_declarations: this.tools.map(tool => tool.function())
+        })
+        let mode = opt.toolMode || 'AUTO'
+        let lastFuncName = (opt.functionResponse)?.map(rsp => rsp.name)
+        const mustSendNextTurn = [
+          'searchImage', 'searchMusic', 'searchVideo'
+        ]
+        if (lastFuncName && lastFuncName?.find(name => mustSendNextTurn.includes(name))) {
+          mode = 'ANY'
+        }
+        delete opt.toolMode
+        body.tool_config = {
+          function_calling_config: {
+            mode
+          }
+        }
+      }
+      if (opt.search) {
+        body.tools.push({ google_search: {} })
+      }
+      if (opt.codeExecution) {
+        body.tools.push({ code_execution: {} })
+      }
+      if (opt.image) {
+        delete body.tools
+      }
+      
+      // 过滤和合并contents
+      body.contents = body.contents.filter(content => content.parts && content.parts.length > 0);
+      
+      if (body.contents.length === 0) {
+        throw new Error('请求中止：没有有效内容可发送 (contents 数组为空)');
+      }
+      
+      body.contents.forEach(content => {
+        delete content.id
+        delete content.parentMessageId
+        delete content.conversationId
       })
-      let mode = opt.toolMode || 'AUTO'
-      let lastFuncName = (opt.functionResponse)?.map(rsp => rsp.name)
-      const mustSendNextTurn = [
-        'searchImage', 'searchMusic', 'searchVideo'
-      ]
-      if (lastFuncName && lastFuncName?.find(name => mustSendNextTurn.includes(name))) {
-        mode = 'ANY'
-      }
-      delete opt.toolMode
-      body.tool_config = {
-        function_calling_config: {
-          mode
-        }
-      }
     }
-    if (opt.search) {
-      body.tools.push({ google_search: {} })
-    }
-    if (opt.codeExecution) {
-      body.tools.push({ code_execution: {} })
-    }
-    if (opt.image) {
-      delete body.tools
-    }
-    body.contents.forEach(content => {
-      delete content.id
-      delete content.parentMessageId
-      delete content.conversationId
-    })
+    
     if (this.debug) {
-      console.debug(JSON.stringify(body))
+      console.debug(`[Gemini Client] Request body:`, JSON.stringify(body, null, 2))
     }
-    console.log(`[Gemini Client] Using API key: ${this._key}`);
+    
+    console.log(`[Gemini Client] Using API key: ${this._key.substring(0, 10)}...`);
+    console.log(`[Gemini Client] Request URL: ${url}`);
+    
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+    // 根据API类型设置不同的请求头
+    const headers = isThirdPartyProxy 
+      ? {
+          'Authorization': `Bearer ${this._key}`,
+          'Content-Type': 'application/json'
+        }
+      : {
+          'x-goog-api-key': this._key,
+          'Content-Type': 'application/json'
+        };
 
     let result
     try {
       result = await newFetch(url, {
         method: 'POST',
         body: JSON.stringify(body),
-        headers: {
-          'x-goog-api-key': this._key
-        },
+        headers: headers,
         signal: controller.signal
       })
     } catch (error) {
@@ -344,7 +452,6 @@ export class CustomGoogleGeminiClient extends GoogleGeminiClientModule.GoogleGem
       }
 
       console.error(`[Gemini] API请求失败，状态码: ${result.status}, 错误信息: ${errorMessageToLog}`);
-      // 抛出包含状态码的错误，以便重试逻辑可以捕获
       throw new Error(`API请求失败: ${result.status} - ${errorMessageToLog}`);
     }
     
@@ -356,33 +463,55 @@ export class CustomGoogleGeminiClient extends GoogleGeminiClientModule.GoogleGem
       throw new Error(`JSON解析失败: ${parseError.message}`)
     }
     
-    let responseContent
-    
     if (this.debug) {
-      console.log(JSON.stringify(response))
+      console.log(`[Gemini Client] Response:`, JSON.stringify(response, null, 2))
     }
     
-    if (!response || !response.candidates || !Array.isArray(response.candidates) || response.candidates.length === 0) {
-      throw new Error(`API返回无效响应: ${JSON.stringify(response)}`)
-    }
+    // 根据API类型处理不同的响应格式
+    let responseContent;
+    let groundingMetadata;
     
-    responseContent = response.candidates[0].content
-    let groundingMetadata = response.candidates[0].groundingMetadata
-    
-    if (!responseContent) {
-      // 如果响应中没有内容，也视为一种可重试的错误
-      if (response.candidates[0].finishReason === 'SAFETY') {
-         throw new Error(`API返回内容被安全策略拦截: ${JSON.stringify(response.candidates[0])}`);
+    if (isThirdPartyProxy) {
+      // 处理第三方反代的OpenAI格式响应
+      if (!response || !response.choices || !Array.isArray(response.choices) || response.choices.length === 0) {
+        throw new Error(`API返回无效响应: ${JSON.stringify(response)}`)
       }
-      throw new Error(`API返回的content为空: ${JSON.stringify(response.candidates[0])}`)
-    }
-    
-    if (response.candidates[0].finishReason === 'MALFORMED_FUNCTION_CALL') {
-      console.warn('遇到MALFORMED_FUNCTION_CALL，将由重试机制处理。')
-      throw new Error('MALFORMED_FUNCTION_CALL');
+      
+      const choice = response.choices[0];
+      if (!choice.message) {
+        throw new Error(`API返回的消息为空: ${JSON.stringify(choice)}`)
+      }
+      
+      // 转换为Gemini格式以保持兼容性
+      responseContent = {
+        role: 'model',
+        parts: [{ text: choice.message.content || '' }]
+      };
+      
+    } else {
+      // 处理官方Google API格式响应
+      if (!response || !response.candidates || !Array.isArray(response.candidates) || response.candidates.length === 0) {
+        throw new Error(`API返回无效响应: ${JSON.stringify(response)}`)
+      }
+      
+      responseContent = response.candidates[0].content
+      groundingMetadata = response.candidates[0].groundingMetadata
+      
+      if (!responseContent) {
+        if (response.candidates[0].finishReason === 'SAFETY') {
+           throw new Error(`API返回内容被安全策略拦截: ${JSON.stringify(response.candidates[0])}`);
+        }
+        throw new Error(`API返回的content为空: ${JSON.stringify(response.candidates[0])}`)
+      }
+      
+      if (response.candidates[0].finishReason === 'MALFORMED_FUNCTION_CALL') {
+        console.warn('遇到MALFORMED_FUNCTION_CALL，将由重试机制处理。')
+        throw new Error('MALFORMED_FUNCTION_CALL');
+      }
     }
 
-    if (responseContent.parts && responseContent.parts.filter(i => i.functionCall).length > 0) {
+    // 函数调用处理（仅对官方API有效，第三方反代通常不支持）
+    if (!isThirdPartyProxy && responseContent.parts && responseContent.parts.filter(i => i.functionCall).length > 0) {
       const functionCall = responseContent.parts.filter(i => i.functionCall).map(i => i.functionCall)
       const text = responseContent.parts.find(i => i.text)?.text
       if (text && text.trim()) {
@@ -431,7 +560,17 @@ export class CustomGoogleGeminiClient extends GoogleGeminiClientModule.GoogleGem
       let responseOpt = _.cloneDeep(opt)
       responseOpt.parentMessageId = idModel
       responseOpt.functionResponse = fcResults
-      await this.upsertMessage(thisMessage)
+      
+      // 存储消息
+      if (!isThirdPartyProxy) {
+        await this.upsertMessage({
+          role: 'user',
+          parts: text ? [{ text }] : [{ text: '' }],
+          id: idThis,
+          parentMessageId: opt.parentMessageId || undefined
+        })
+      }
+      
       responseContent = handleSearchResponse(responseContent).responseContent
       const respMessage = Object.assign(responseContent, {
         id: idModel,
@@ -441,8 +580,19 @@ export class CustomGoogleGeminiClient extends GoogleGeminiClientModule.GoogleGem
       // The recursive call is now handled by the main sendMessage retry loop
       return await this.sendMessage('', responseOpt)
     }
+    
+    // 存储消息到历史记录
     if (responseContent) {
-      await this.upsertMessage(thisMessage)
+      // 存储用户消息
+      const userMessage = {
+        role: 'user',
+        parts: text ? [{ text }] : [{ text: '' }],
+        id: idThis,
+        parentMessageId: opt.parentMessageId || undefined
+      };
+      await this.upsertMessage(userMessage);
+      
+      // 存储助手回复
       const respMessage = Object.assign(responseContent, {
         id: idModel,
         parentMessageId: idThis
@@ -460,20 +610,24 @@ export class CustomGoogleGeminiClient extends GoogleGeminiClientModule.GoogleGem
     }
     
     let { final } = handleSearchResponse(responseContent)
-    try {
-      if (groundingMetadata?.groundingChunks) {
-        final += '\n参考资料\n'
-        groundingMetadata.groundingChunks.forEach(chunk => {
-          final += `[${chunk.web.title}]\n`
-        })
-        if (groundingMetadata.webSearchQueries && Array.isArray(groundingMetadata.webSearchQueries)) {
-          groundingMetadata.webSearchQueries.forEach(q => {
-            console.info('search query: ' + q)
+    
+    // 处理搜索结果元数据（仅官方API）
+    if (!isThirdPartyProxy) {
+      try {
+        if (groundingMetadata?.groundingChunks) {
+          final += '\n参考资料\n'
+          groundingMetadata.groundingChunks.forEach(chunk => {
+            final += `[${chunk.web.title}]\n`
           })
+          if (groundingMetadata.webSearchQueries && Array.isArray(groundingMetadata.webSearchQueries)) {
+            groundingMetadata.webSearchQueries.forEach(q => {
+              console.info('search query: ' + q)
+            })
+          }
         }
+      } catch (err) {
+        console.warn(err)
       }
-    } catch (err) {
-      console.warn(err)
     }
 
     return {

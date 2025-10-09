@@ -3,6 +3,7 @@ import plugin from '../../../lib/plugins/plugin.js' // Yunzai 插件基类
 import common from '../../../lib/common/common.js' // Yunzai 通用工具函数
 import _ from 'lodash' // lodash 工具库，提供实用函数
 import { Config } from '../utils/config.js' // 插件配置管理
+import { Greet } from './greet.js';
 import {
   // completeJSON,        // JSON 补全工具
   // formatDate,          // 日期格式化
@@ -294,6 +295,7 @@ export class chatgpt extends plugin {///////////////////////////////////// * Cha
     
     // 保存切换模式配置到实例
     this.toggleMode = toggleMode
+    this.greet = new Greet()
   }
 
   /**
@@ -856,7 +858,7 @@ export class chatgpt extends plugin {///////////////////////////////////// * Cha
     const now = new Date()
     const currentDateTime = `${now.getFullYear()}年${String(now.getMonth() + 1).padStart(2, '0')}月${String(now.getDate()).padStart(2, '0')}日 ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
 
-    prompt = `当前日期时间：${currentDateTime} (星期${['日', '一', '二', '三', '四', '五', '六'][now.getDay()]}) 对话人QQ号：${e.sender.user_id}  用户消息：${prompt}`
+    prompt = `当前日期时间：${currentDateTime} (星期${['日', '一', '二', '三', '四', '五', '六'][now.getDay()]}) 对话人：${e.sender.nickname}(QQ:${e.sender.user_id})  用户消息：${prompt}`
 
     // ==================== 消息缓冲和延迟处理机制 ====================
     // 【恢复】消息缓冲和等待机制 (回到之前5秒延迟的模式)
@@ -864,55 +866,27 @@ export class chatgpt extends plugin {///////////////////////////////////// * Cha
     // 设置中断标志
     interruptionFlags.set(conversationKey, true);
 
-    // ==================== 消息缓冲和延迟处理机制 ====================
-    // 设置中断标志
-    interruptionFlags.set(conversationKey, true);
-
     // 检查是否有正在处理的API调用
-    if (processingPrompts.has(conversationKey)) {
+    if (pendingRequests.has(conversationKey)) {
       // **新增：中止上一个正在进行的API请求**
-      if (pendingRequests.has(conversationKey)) {
-        const { controller } = pendingRequests.get(conversationKey);
-        if (controller) {
-          controller.abort(); // 发出中止信号
-          logger.info(`[ChatGPT] 已中止对话键 ${conversationKey} 的上一个API请求。`);
-        }
-        // pendingRequests.delete(conversationKey) 会在 abstractChat 的 finally 中处理
+      const pending = pendingRequests.get(conversationKey);
+      if (pending && pending.controller) {
+        pending.controller.abort(); // 发出中止信号
+        logger.info(`[ChatGPT] 已中止对话键 ${conversationKey} 的上一个API请求。`);
       }
-
-      // 合并消息逻辑
-      const oldPrompt = processingPrompts.get(conversationKey);
-      const oldUserMessage = oldPrompt.match(/用户消息：(.*)$/)?.[1] || '';
-      const newUserMessage = prompt.match(/用户消息：(.*)$/)?.[1] || '';
-      
-      const prefixMatch = oldPrompt.match(/^(当前日期时间：.*?用户消息：)/);
-      if (prefixMatch) {
-        const prefix = prefixMatch[1];
-        prompt = prefix + oldUserMessage + ' ' + newUserMessage;
-        logger.info(`[ChatGPT] API调用被打断，新旧消息已合并。合并后: '${prompt}'`);
-      }
-      
-      // 将合并后的消息作为当前缓冲区的第一条消息
-      const buffer = chatMessageBuffers.get(conversationKey) || { messages: [], timer: null, e: null, use: use, forcePictureMode: forcePictureMode };
-      buffer.messages = [prompt];
-      if (!chatMessageBuffers.has(conversationKey)) {
-          chatMessageBuffers.set(conversationKey, buffer);
-      }
-      
-      // 注意：这里的 processingPrompts.delete 逻辑移动到 abstractChat 的 finally 块中，以确保状态一致性
-    } else {
-      // 原始逻辑：将新消息添加到缓冲区
-      if (!chatMessageBuffers.has(conversationKey)) {
-          chatMessageBuffers.set(conversationKey, { 
-            messages: [],
-            timer: null,
-            e: null,
-            use: use,
-            forcePictureMode: forcePictureMode
-          });
-      }
-      chatMessageBuffers.get(conversationKey).messages.push(prompt);
     }
+
+    // 总是将新消息添加到缓冲区
+    if (!chatMessageBuffers.has(conversationKey)) {
+        chatMessageBuffers.set(conversationKey, { 
+          messages: [],
+          timer: null,
+          e: null,
+          use: use,
+          forcePictureMode: forcePictureMode
+        });
+    }
+    chatMessageBuffers.get(conversationKey).messages.push(prompt);
 
     const buffer = chatMessageBuffers.get(conversationKey);
 
@@ -1100,6 +1074,24 @@ export class chatgpt extends plugin {///////////////////////////////////// * Cha
       if (processingPrompts.get(conversationKey) !== prompt) {
         logger.info(`[ChatGPT] API调用返回，但prompt已被新消息合并处理，本次结果作废。`);
         return;
+      }
+
+      // 新增：在所有后处理之前，首先检查并提取消息意愿参数
+      if (chatMessage && chatMessage.text) {
+        const willingnessRegex = /\{\{消息意愿:(-?\d+)\}\}/;
+        const match = chatMessage.text.match(willingnessRegex);
+        if (match) {
+          const minutes = parseInt(match[1], 10);
+          logger.info(`[聊天意愿] 捕获到消息意愿参数: ${minutes}分钟`);
+          
+          // 从消息中移除该标记，以便后续处理
+          chatMessage.text = chatMessage.text.replace(willingnessRegex, '').trim();
+
+          // 调用 greet 插件的函数来更新问候计划
+          if (this.greet) {
+            this.greet.updateGreetingPlan(e.user_id.toString(), minutes);
+          }
+        }
       }
 
       if (chatMessage?.noMsg) {
@@ -1421,6 +1413,22 @@ export class chatgpt extends plugin {///////////////////////////////////// * Cha
       if (processingPrompts.get(conversationKey) === prompt) {
         processingPrompts.delete(conversationKey);
       }
+
+      // 检查并提取消息意愿参数（仅在 chatMessage 已定义时执行）
+      // if (typeof chatMessage !== 'undefined' && chatMessage && chatMessage.text) {
+      //   const willingnessRegex = /\{\{消息意愿:(-?\d+)\}\}/;
+      //   const match = chatMessage.text.match(willingnessRegex);
+      //   if (match) {
+      //     const minutes = parseInt(match[1], 10);
+      //     logger.info(`[聊天意愿] 捕获到消息意愿参数: ${minutes}分钟`);
+      //     // 从消息中移除该标记
+      //     chatMessage.text = chatMessage.text.replace(willingnessRegex, '').trim();
+      //     // 调用 greet 插件的函数来更新问候计划
+      //     if (this.greet) {
+      //       this.greet.updateGreetingPlan(e.user_id.toString(), minutes);
+      //     }
+      //   }
+      // }
     }
     
     // AI响应完成后，清除用户的续接对话状态
